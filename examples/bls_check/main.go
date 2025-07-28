@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -181,13 +182,52 @@ func main() {
 		panic(fmt.Sprintf("failed to generate proof: %v", err))
 	}
 	var buf bytes.Buffer
-	_, err = proof.WriteTo(&buf)
+	_, err = proof.WriteRawTo(&buf)
 	if err != nil {
 		panic(fmt.Sprintf("failed to serialize proof: %v", err))
 	}
 	proofSize := buf.Len()
 	fmt.Printf("Prove generation time: %v\n", proveTime)
 	fmt.Printf("Proof size: %d bytes\n", proofSize)
+
+	// 目标文件名
+	filename := "proof.txt"
+
+	// 方法 1：使用 os.Create 和 buf.WriteTo
+	file, err := os.Create(filename)
+	if err != nil {
+		fmt.Println("创建文件失败:", err)
+		return
+	}
+	defer file.Close() // 确保文件关闭
+
+	// 将 buf 内容写入文件
+	_, err = proof.WriteTo(file)
+	if err != nil {
+		fmt.Println("写入文件失败:", err)
+		return
+	}
+	fmt.Println("成功写入文件:", filename)
+
+	buf.Reset()
+	_, err = vk.WriteRawTo(&buf)
+	if err != nil {
+		panic(fmt.Sprintf("failed to serialize verification key: %v", err))
+	}
+	// 将验证密钥写入文件
+	vkFile, err := os.Create("vk.txt")
+	if err != nil {
+		fmt.Println("创建验证密钥文件失败:", err)
+		return
+	}
+	defer vkFile.Close() // 确保文件关闭
+
+	_, err = buf.WriteTo(vkFile)
+	if err != nil {
+		fmt.Println("写入验证密钥文件失败:", err)
+		return
+	}
+	fmt.Println("成功写入验证密钥文件: vk.txt")
 
 	err = plonk.Verify(proof, vk, witnessPublic)
 	if err != nil {
