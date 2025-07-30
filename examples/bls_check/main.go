@@ -25,11 +25,15 @@ type BLSSignatureCircuit struct {
 	Signature   sw_bls12381.G2Affine // 签名 σ ∈ G2
 	PubKey      sw_bls12381.G1Affine // 公钥 PK ∈ G1
 	MessageHash sw_bls12381.G2Affine // 消息哈希 H(m) ∈ G2
-	G1Gen       sw_bls12381.G1Affine // G1 群的生成元 G_1
+
 }
 
 // Define 定义电路约束
 func (c *BLSSignatureCircuit) Define(api frontend.API) error {
+
+	_, _, g1gen, _ := bls12381.Generators()
+	g1gen.Neg(&g1gen)
+	oneG1 := sw_bls12381.NewG1Affine(g1gen)
 	// 初始化配对计算对象
 	pairing, err := sw_bls12381.NewPairing(api)
 	if err != nil {
@@ -38,7 +42,7 @@ func (c *BLSSignatureCircuit) Define(api frontend.API) error {
 
 	// 验证配对等式：e(Signature, G2Gen) == e(MessageHash, PubKey)
 	err = pairing.PairingCheck(
-		[]*sw_bls12381.G1Affine{&c.PubKey, &c.G1Gen},          // G1 点 (生成元和公钥)
+		[]*sw_bls12381.G1Affine{&c.PubKey, &oneG1},            // G1 点 (生成元和公钥)
 		[]*sw_bls12381.G2Affine{&c.MessageHash, &c.Signature}, // G2 点 (签名和消息哈希)
 	)
 	if err != nil {
