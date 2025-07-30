@@ -160,7 +160,6 @@ func main() {
 		Signature:   sw_bls12381.NewG2Affine(sigG2Point),
 		PubKey:      sw_bls12381.NewG1Affine(pkG1Point),
 		MessageHash: sw_bls12381.NewG2Affine(msgG2Point),
-		G1Gen:       sw_bls12381.NewG1Affine(g1gen),
 	}
 
 	witnessFull, err := frontend.NewWitness(&w, ecc.BLS12_381.ScalarField())
