@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"log"
 
@@ -16,9 +15,12 @@ import (
 	"github.com/consensys/gnark/test/unsafekzg"
 )
 
+var (
+	BLSDomain = []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_xxxxxxxx")
+)
+
 type hashToG2Circuit struct {
-	Msg []byte
-	Dst []byte
+	Msg []uints.U8
 	Res sw_bls12381.G2Affine
 }
 
@@ -27,19 +29,12 @@ func (c *hashToG2Circuit) Define(api frontend.API) error {
 	if err != nil {
 		return err
 	}
-	res, e := g2.HashToG2(api, uints.NewU8Array(c.Msg[:]), c.Dst[:])
+	res, e := g2.HashToG2(api, c.Msg, BLSDomain)
 	if e != nil {
 		return e
 	}
 	g2.AssertIsEqual(res, &c.Res)
 	return nil
-}
-
-func getDst() []byte {
-	dstHex := "412717974da474d0f8c420f320ff81e8432adb7c927d9bd082b4fb4d16c0a236"
-	dst := make([]byte, len(dstHex)/2)
-	hex.Decode(dst, []byte(dstHex))
-	return dst
 }
 
 func main() {
@@ -48,22 +43,20 @@ func main() {
 	if len(msg) != 13 {
 		log.Fatalf("Msg length must be 13 bytes, got %d", len(msg))
 	}
-	dst := getDst()
-	if len(dst) != 32 {
-		log.Fatalf("dst length must be 13 bytes, got %d", len(dst))
-	}
-	hash, err := bls12381.HashToG2(msg, dst)
+	hash, err := bls12381.HashToG2(msg, BLSDomain)
 	if err != nil {
 		log.Fatal("Failed to hash message to G2: ", err)
 	}
+	testdata := make([]uints.U8, len(msg))
+	for i := 0; i < len(testdata); i++ {
+		testdata[i] = uints.NewU8(msg[i])
+	}
 	w := hashToG2Circuit{
-		Msg: []uint8([]byte("Hello, Woold!")),
-		Dst: dst,
+		Msg: testdata,
 		Res: sw_bls12381.NewG2Affine(hash),
 	}
 	circuit := hashToG2Circuit{
-		Msg: []uint8([]byte("Hello, World!")),
-		Dst: dst,
+		Msg: make([]uints.U8, len(msg)),
 		Res: sw_bls12381.NewG2Affine(hash),
 	}
 	// // building the circuit...
