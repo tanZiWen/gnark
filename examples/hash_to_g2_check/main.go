@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"log"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -26,7 +27,7 @@ func (c *hashToG2Circuit) Define(api frontend.API) error {
 	if err != nil {
 		return err
 	}
-	res, e := g2.HashToG2(api, uints.NewU8Array(c.Msg), c.Dst)
+	res, e := g2.HashToG2(api, uints.NewU8Array(c.Msg[:]), c.Dst[:])
 	if e != nil {
 		return e
 	}
@@ -42,8 +43,29 @@ func getDst() []byte {
 }
 
 func main() {
-	var circuit hashToG2Circuit
-
+	fmt.Println("1")
+	msg := []byte("Hello, World!")
+	if len(msg) != 13 {
+		log.Fatalf("Msg length must be 13 bytes, got %d", len(msg))
+	}
+	dst := getDst()
+	if len(dst) != 32 {
+		log.Fatalf("dst length must be 13 bytes, got %d", len(dst))
+	}
+	hash, err := bls12381.HashToG2(msg, dst)
+	if err != nil {
+		log.Fatal("Failed to hash message to G2: ", err)
+	}
+	w := hashToG2Circuit{
+		Msg: []uint8([]byte("Hello, Woold!")),
+		Dst: dst,
+		Res: sw_bls12381.NewG2Affine(hash),
+	}
+	circuit := hashToG2Circuit{
+		Msg: []uint8([]byte("Hello, World!")),
+		Dst: dst,
+		Res: sw_bls12381.NewG2Affine(hash),
+	}
 	// // building the circuit...
 	ccs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, &circuit)
 	if err != nil {
@@ -55,17 +77,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	msg := []byte("Hello, World!")
-	dst := getDst()
-	hash, err := bls12381.HashToG2(msg, dst)
-	if err != nil {
-		log.Fatal("Failed to hash message to G2: ", err)
-	}
-	w := hashToG2Circuit{
-		Msg: msg,
-		Dst: dst,
-		Res: sw_bls12381.NewG2Affine(hash),
-	}
+
 	witnessFull, err := frontend.NewWitness(&w, ecc.BLS12_381.ScalarField())
 	if err != nil {
 		log.Fatal(err)
