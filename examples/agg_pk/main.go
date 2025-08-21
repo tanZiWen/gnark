@@ -1,277 +1,165 @@
 package main
 
 import (
-	"crypto/rand"
 	"fmt"
-	"log"
-	"time"
+	"math/big"
 
 	"github.com/consensys/gnark-crypto/ecc"
-	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
-	"github.com/consensys/gnark/backend/plonk"
-	cs "github.com/consensys/gnark/constraint/bls12-381"
+	native_plonk "github.com/consensys/gnark/backend/plonk"
+	"github.com/consensys/gnark/backend/witness"
+	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/scs"
+	"github.com/consensys/gnark/std/algebra"
+
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
-	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/math/emulated"
+	"github.com/consensys/gnark/std/recursion/plonk"
 	"github.com/consensys/gnark/test/unsafekzg"
-	blst "github.com/supranational/blst/bindings/go"
 )
 
-// AggregatePublicKeyCircuit 定义聚合公钥验证电路
-type AggregatePublicKeyCircuit struct {
-	// 私有输入：三个单独的公钥
-	PubKey1 sw_bls12381.G1Affine
-	PubKey2 sw_bls12381.G1Affine
-	PubKey3 sw_bls12381.G1Affine
-
-	// 公开输入：聚合后的公钥
-	AggregatedPubKey sw_bls12381.G1Affine
+type InnerCircuitNative struct {
+	P, Q frontend.Variable
+	N    frontend.Variable `gnark:",public"`
 }
 
-// Define 定义电路约束：验证 PubKey1 + PubKey2 + PubKey3 == AggregatedPubKey
-func (circuit *AggregatePublicKeyCircuit) Define(api frontend.API) error {
-	// 创建椭圆曲线操作对象
-	curve, err := sw_emulated.New[emulated.BLS12381Fp, emulated.BLS12381Fr](
-		api, sw_emulated.GetBLS12381Params())
-	if err != nil {
-		return fmt.Errorf("failed to create curve: %w", err)
-	}
-
-	// 计算三个公钥的聚合：PubKey1 + PubKey2 + PubKey3
-	temp := curve.AddUnified(&circuit.PubKey1, &circuit.PubKey2)
-	computedAggPubKey := curve.AddUnified(temp, &circuit.PubKey3)
-
-	// 验证计算出的聚合公钥等于给定的聚合公钥
-	curve.AssertIsEqual(computedAggPubKey, &circuit.AggregatedPubKey)
-
+func (c *InnerCircuitNative) Define(api frontend.API) error {
+	// prove that P*Q == N
+	res := api.Mul(c.P, c.Q)
+	api.AssertIsEqual(res, c.N)
+	// we must also enforce that P != 1 and Q != 1
+	api.AssertIsDifferent(c.P, 1)
+	api.AssertIsDifferent(c.Q, 1)
 	return nil
 }
 
-// 类型别名
-type PublicKey = blst.P1Affine
-type AggregatePublicKey = blst.P1Aggregate
-
-// createTestKeys 创建测试用的密钥对
-func createTestKeys() ([]PublicKey, PublicKey) {
-	var publicKeys []PublicKey
-
-	// 生成3个随机密钥对
-	for i := 0; i < 3; i++ {
-		var ikm [32]byte
-		_, err := rand.Read(ikm[:])
-		if err != nil {
-			log.Fatal("Failed to generate random IKM:", err)
-		}
-
-		// 生成私钥和公钥
-		sk := blst.KeyGen(ikm[:])
-		pk := new(PublicKey).From(sk)
-		publicKeys = append(publicKeys, *pk)
-
-		fmt.Printf("Generated Public Key %d: %x\n", i+1, pk.Serialize()[:16]) // 显示前16字节
-	}
-
-	// 聚合公钥
-	aggPubKey := new(AggregatePublicKey)
-	pkPointers := make([]*PublicKey, len(publicKeys))
-	for i := range publicKeys {
-		pkPointers[i] = &publicKeys[i]
-	}
-
-	success := aggPubKey.Aggregate(pkPointers, true)
-	if !success {
-		log.Fatal("Failed to aggregate public keys")
-	}
-
-	aggregatedPK := aggPubKey.ToAffine()
-	fmt.Printf("Aggregated Public Key: %x\n", aggregatedPK.Serialize()[:16]) // 显示前16字节
-
-	return publicKeys, *aggregatedPK
-}
-
-// convertToGnarkG1 将 blst.P1Affine 转换为 bls12381.G1Affine
-func convertToGnarkG1(blstPK PublicKey) bls12381.G1Affine {
-	var gnarkPK bls12381.G1Affine
-	serialized := blstPK.Serialize()
-
-	if len(serialized) != 96 {
-		log.Fatalf("Serialized G1 point should be 96 bytes, got: %d", len(serialized))
-	}
-
-	if _, err := gnarkPK.SetBytes(serialized); err != nil {
-		log.Fatal("Failed to decode G1 point from compressed bytes:", err)
-	}
-
-	return gnarkPK
-}
-
-// verifyAggregationNatively 使用原生方法验证聚合是否正确
-func verifyAggregationNatively(publicKeys []PublicKey, aggregatedPK PublicKey) bool {
-	// 手动计算聚合
-	var acc bls12381.G1Jac
-	first := convertToGnarkG1(publicKeys[0])
-	acc.FromAffine(&first)
-
-	for i := 1; i < len(publicKeys); i++ {
-		var pkJac bls12381.G1Jac
-		pk := convertToGnarkG1(publicKeys[i])
-		pkJac.FromAffine(&pk)
-		acc.AddAssign(&pkJac)
-	}
-
-	var result bls12381.G1Affine
-	result.FromJacobian(&acc)
-
-	expected := convertToGnarkG1(aggregatedPK)
-	return result.Equal(&expected)
-}
-
-// createCircuitTemplate 创建电路编译模板
-func createCircuitTemplate() *AggregatePublicKeyCircuit {
-	// 使用零点进行初始化（仅用于编译）
-	var zero bls12381.G1Affine
-	zero.SetInfinity()
-
-	return &AggregatePublicKeyCircuit{
-		PubKey1:          sw_bls12381.NewG1Affine(zero),
-		PubKey2:          sw_bls12381.NewG1Affine(zero),
-		PubKey3:          sw_bls12381.NewG1Affine(zero),
-		AggregatedPubKey: sw_bls12381.NewG1Affine(zero),
-	}
-}
-
-// testWrongAggregation 测试使用错误聚合公钥时的情况
-func testWrongAggregation(r1cs *cs.SparseR1CS, pk plonk.ProvingKey, publicKeys []PublicKey) {
-	fmt.Println("测试错误的聚合公钥...")
-
-	// 创建一个错误的聚合公钥（使用第一个公钥作为"错误的"聚合公钥）
-	wrongAggPK := publicKeys[0]
-
-	gnarkPK1 := convertToGnarkG1(publicKeys[0])
-	gnarkPK2 := convertToGnarkG1(publicKeys[1])
-	gnarkPK3 := convertToGnarkG1(publicKeys[2])
-	gnarkWrongAggPK := convertToGnarkG1(wrongAggPK)
-
-	wrongWitness := AggregatePublicKeyCircuit{
-		PubKey1:          sw_bls12381.NewG1Affine(gnarkPK1),
-		PubKey2:          sw_bls12381.NewG1Affine(gnarkPK2),
-		PubKey3:          sw_bls12381.NewG1Affine(gnarkPK3),
-		AggregatedPubKey: sw_bls12381.NewG1Affine(gnarkWrongAggPK), // 错误的聚合公钥
-	}
-
-	wrongWitnessFull, err := frontend.NewWitness(&wrongWitness, ecc.BLS12_381.ScalarField())
+func computeInnerProof(field, outer *big.Int) (constraint.ConstraintSystem, native_plonk.VerifyingKey, witness.Witness, native_plonk.Proof) {
+	innerCcs, err := frontend.Compile(field, scs.NewBuilder, &InnerCircuitNative{})
 	if err != nil {
-		log.Fatal("创建错误 witness 失败:", err)
+		panic(err)
+	}
+	// NB! UNSAFE! Use MPC.
+	srs, srsLagrange, err := unsafekzg.NewSRS(innerCcs)
+	if err != nil {
+		panic(err)
 	}
 
-	// 尝试生成证明，应该失败
-	_, err = plonk.Prove(r1cs, pk, wrongWitnessFull)
+	innerPK, innerVK, err := native_plonk.Setup(innerCcs, srs, srsLagrange)
 	if err != nil {
-		fmt.Printf("✅ 预期的错误：使用错误聚合公钥时证明生成失败\n")
-		fmt.Printf("   错误信息: %v\n", err)
-	} else {
-		fmt.Println("❌ 意外：使用错误聚合公钥时证明竟然成功了！")
+		panic(err)
 	}
+
+	// inner proof
+	innerAssignment := &InnerCircuitNative{
+		P: 3,
+		Q: 5,
+		N: 15,
+	}
+	innerWitness, err := frontend.NewWitness(innerAssignment, field)
+	if err != nil {
+		panic(err)
+	}
+	innerProof, err := native_plonk.Prove(innerCcs, innerPK, innerWitness, plonk.GetNativeProverOptions(outer, field))
+	if err != nil {
+		panic(err)
+	}
+	innerPubWitness, err := innerWitness.Public()
+	if err != nil {
+		panic(err)
+	}
+	err = native_plonk.Verify(innerProof, innerVK, innerPubWitness, plonk.GetNativeVerifierOptions(outer, field))
+	if err != nil {
+		panic(err)
+	}
+	return innerCcs, innerVK, innerPubWitness, innerProof
+}
+
+type OuterCircuit[FR emulated.FieldParams, G1El algebra.G1ElementT, G2El algebra.G2ElementT, GtEl algebra.GtElementT] struct {
+	Proof        plonk.Proof[FR, G1El, G2El]
+	VerifyingKey plonk.VerifyingKey[FR, G1El, G2El] `gnark:"-"` // constant verification key
+	InnerWitness plonk.Witness[FR]                  `gnark:",public"`
+}
+
+func (c *OuterCircuit[FR, G1El, G2El, GtEl]) Define(api frontend.API) error {
+	verifier, err := plonk.NewVerifier[FR, G1El, G2El, GtEl](api)
+	if err != nil {
+		return fmt.Errorf("new verifier: %w", err)
+	}
+	err = verifier.AssertProof(c.VerifyingKey, c.Proof, c.InnerWitness)
+	return err
 }
 
 func main() {
-	fmt.Println("=== BLS12-381 聚合公钥验证电路示例 ===")
-	fmt.Printf("当前用户: %s\n", "tanZiWen")
-	fmt.Printf("当前时间: %s\n\n", "2025-08-04 14:16:50")
+	// compute the proof which we want to verify recursively
+	// 使用 BLS12-381 作为内部和外部曲线
+	innerCcs, innerVK, innerWitness, innerProof := computeInnerProof(
+		ecc.BLS12_381.ScalarField(), ecc.BLS12_381.ScalarField(),
+	)
 
-	// 1. 生成测试密钥
-	fmt.Println("1. 生成测试密钥...")
-	publicKeys, aggregatedPK := createTestKeys()
-
-	// 2. 验证聚合是否正确（使用原生方法）
-	fmt.Println("\n2. 原生验证聚合公钥...")
-	if verifyAggregationNatively(publicKeys, aggregatedPK) {
-		fmt.Println("✅ 原生验证通过：聚合公钥正确")
-	} else {
-		log.Fatal("❌ 原生验证失败：聚合公钥不正确")
-	}
-
-	// 3. 编译电路
-	fmt.Println("\n3. 编译零知识证明电路...")
-	// circuit := createCircuitTemplate()
-	var circuit AggregatePublicKeyCircuit
-
-	r1cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, &circuit)
+	// initialize the witness elements
+	circuitVk, err := plonk.ValueOfVerifyingKey[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine](innerVK)
 	if err != nil {
-		log.Fatal("电路编译失败:", err)
+		panic(err)
 	}
-	fmt.Printf("✅ 电路编译成功，约束数量: %d\n", r1cs.GetNbConstraints())
-
-	// 4. Setup PLONK
-	fmt.Println("\n4. 执行 PLONK Setup...")
-	scs := r1cs.(*cs.SparseR1CS)
-	srs, srsLagrange, err := unsafekzg.NewSRS(scs)
+	circuitWitness, err := plonk.ValueOfWitness[sw_bls12381.ScalarField](innerWitness)
 	if err != nil {
-		log.Fatal("SRS 生成失败:", err)
+		panic(err)
 	}
-
-	pk, vk, err := plonk.Setup(r1cs, srs, srsLagrange)
+	circuitProof, err := plonk.ValueOfProof[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine](innerProof)
 	if err != nil {
-		log.Fatal("PLONK Setup 失败:", err)
-	}
-	fmt.Println("✅ PLONK Setup 完成")
-
-	// 5. 创建正确的 witness
-	fmt.Println("\n5. 创建证明用的 witness...")
-	gnarkPK1 := convertToGnarkG1(publicKeys[0])
-	gnarkPK2 := convertToGnarkG1(publicKeys[1])
-	gnarkPK3 := convertToGnarkG1(publicKeys[2])
-	gnarkAggPK := convertToGnarkG1(aggregatedPK)
-
-	witness := AggregatePublicKeyCircuit{
-		PubKey1:          sw_bls12381.NewG1Affine(gnarkPK1),
-		PubKey2:          sw_bls12381.NewG1Affine(gnarkPK2),
-		PubKey3:          sw_bls12381.NewG1Affine(gnarkPK3),
-		AggregatedPubKey: sw_bls12381.NewG1Affine(gnarkAggPK),
+		panic(err)
 	}
 
-	// 6. 生成 witness
-	witnessFull, err := frontend.NewWitness(&witness, ecc.BLS12_381.ScalarField())
+	outerCircuit := &OuterCircuit[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine, sw_bls12381.GTEl]{
+		InnerWitness: plonk.PlaceholderWitness[sw_bls12381.ScalarField](innerCcs),
+		Proof:        plonk.PlaceholderProof[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine](innerCcs),
+		VerifyingKey: circuitVk,
+	}
+	outerAssignment := &OuterCircuit[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine, sw_bls12381.GTEl]{
+		InnerWitness: circuitWitness,
+		Proof:        circuitProof,
+	}
+	// compile the outer circuit
+	ccs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, outerCircuit)
 	if err != nil {
-		log.Fatal("创建完整 witness 失败:", err)
+		panic("compile failed: " + err.Error())
 	}
 
-	witnessPublic, err := frontend.NewWitness(&witness, ecc.BLS12_381.ScalarField(), frontend.PublicOnly())
+	// NB! UNSAFE! Use MPC.
+	srs, srsLagrange, err := unsafekzg.NewSRS(ccs)
 	if err != nil {
-		log.Fatal("创建公开 witness 失败:", err)
+		panic(err)
 	}
 
-	// 7. 生成证明
-	fmt.Println("\n6. 生成零知识证明...")
-	startTime := time.Now()
-
-	proof, err := plonk.Prove(r1cs, pk, witnessFull)
+	// create PLONK setup. NB! UNSAFE
+	pk, vk, err := native_plonk.Setup(ccs, srs, srsLagrange) // UNSAFE! Use MPC
 	if err != nil {
-		log.Fatal("证明生成失败:", err)
+		panic("setup failed: " + err.Error())
 	}
 
-	proveTime := time.Since(startTime)
-	fmt.Printf("✅ 证明生成成功，耗时: %v\n", proveTime)
-
-	// 8. 验证证明
-	fmt.Println("\n7. 验证零知识证明...")
-	startTime = time.Now()
-
-	err = plonk.Verify(proof, vk, witnessPublic)
+	// create prover witness from the assignment
+	secretWitness, err := frontend.NewWitness(outerAssignment, ecc.BLS12_381.ScalarField())
 	if err != nil {
-		log.Fatal("证明验证失败:", err)
+		panic("secret witness failed: " + err.Error())
 	}
 
-	verifyTime := time.Since(startTime)
-	fmt.Printf("✅ 证明验证成功，耗时: %v\n", verifyTime)
+	// create public witness from the assignment
+	publicWitness, err := secretWitness.Public()
+	if err != nil {
+		panic("public witness failed: " + err.Error())
+	}
 
-	// 9. 测试错误情况：使用错误的聚合公钥
-	fmt.Println("\n8. 测试错误情况...")
-	testWrongAggregation(scs, pk, publicKeys)
+	// construct the PLONK proof of verifying PLONK proof in-circuit
+	outerProof, err := native_plonk.Prove(ccs, pk, secretWitness)
+	if err != nil {
+		panic("proving failed: " + err.Error())
+	}
 
-	fmt.Println("\n=== 演示完成 ===")
-	fmt.Println("✅ 成功证明了三个公钥的聚合等于给定的聚合公钥")
-	fmt.Println("✅ 零知识证明系统正确拒绝了错误的聚合公钥")
+	// verify the PLONK proof
+	err = native_plonk.Verify(outerProof, vk, publicWitness)
+	if err != nil {
+		panic("circuit verification failed: " + err.Error())
+	}
+
+	fmt.Println("递归证明验证成功！")
 }
